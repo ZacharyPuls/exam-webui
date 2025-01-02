@@ -71,6 +71,11 @@ class ExamTemplate(models.Model):
         except NoValuesFetched:
             return 0
 
+    def __repr__(self):
+        return str(
+            f"ExamTemplate{{id={self.id}, name={self.name},questions=[{','.join([repr(question) for question in self.questions])}]}}"
+        )
+
 
 class ExamTemplateQuestion(models.Model):
     id = fields.UUIDField(pk=True)
@@ -83,6 +88,11 @@ class ExamTemplateQuestion(models.Model):
     body = fields.TextField()
     responses: fields.ReverseRelation["ExamTemplateQuestionResponse"]
 
+    def __repr__(self):
+        return str(
+            f"ExamTemplateQuestion{{id={self.id}, exam_template={repr(self.exam_template.id)},type={self.type},body={self.body},responses=[{','.join([repr(response) for response in self.responses])}]}}"
+        )
+
 
 class ExamTemplateQuestionResponse(models.Model):
     id = fields.UUIDField(pk=True)
@@ -94,3 +104,9 @@ class ExamTemplateQuestionResponse(models.Model):
         )
     )
     value = fields.TextField()
+    is_correct = fields.BooleanField()
+
+    def __repr__(self):
+        return str(
+            f"ExamTemplateQuestionResponse{{id={self.id}, exam_template_question={repr(self.exam_template_question.id)},value={self.value},is_correct={self.is_correct}}}"
+        )

@@ -1,10 +1,21 @@
 from typing import List
 from uuid import UUID
 
+import config
+import jwt
 import model
 
+import msal
+
+import requests
+
 from admin.exam_template import ExamTemplate
-from nicegui import observables, ui
+from cachetools import TTLCache
+from fastapi import Request
+from fastapi.responses import RedirectResponse
+
+from jwt.algorithms import RSAAlgorithm
+from nicegui import app, Client, ui
 
 from style import Frame, TextLabel
 
@@ -14,6 +25,100 @@ TEST_RESULTS: frozenset[tuple[str, bool]] = [
     ["MPLS Fundamentals", True],
     ["MPLS L2VPN Troubleshooting", False],
 ]
+
+INPROGRESS_AUTH_FLOW_CACHE = TTLCache(maxsize=10, ttl=60 * 5)
+USER_CACHE = TTLCache(maxsize=100, ttl=60 * 60 * 10)
+
+msal_application = msal.ConfidentialClientApplication(
+    client_id=config.ENTRA_CLIENT_ID,
+    client_credential=config.ENTRA_CLIENT_SECRET,
+    authority=config.ENTRA_AUTHORITY,
+)
+
+
+@ui.page("/login")
+async def login_page(request: Request) -> None:
+    auth_flow = msal_application.initiate_auth_code_flow(
+        scopes=config.ENTRA_APPLICATION_SCOPE,
+        redirect_uri=f"{str(request.base_url).rstrip("/")}{config.OAUTH_REDIRECT_URI}",
+    )
+    browser_id = app.storage.browser["id"]
+    INPROGRESS_AUTH_FLOW_CACHE[browser_id] = auth_flow
+
+    return RedirectResponse(auth_flow["auth_uri"])
+
+
+def get_tenant_public_key(key_id: str) -> str:
+    jwks_json = requests.get(config.ENTRA_JWKS_URL, timeout=60).json()
+
+    key = next((key for key in jwks_json["keys"] if key["kid"] == key_id), None)
+
+    if key:
+        return RSAAlgorithm.from_jwk(key)
+    raise RuntimeError(
+        f"[get_tenant_public_key] Public key not found for key_id: {key_id}"
+    )
+
+
+def validate_and_decode_jwt_token(jwt_token: str) -> str:
+    jwt_header = jwt.get_unverified_header(jwt_token)
+    public_key = get_tenant_public_key(jwt_header["kid"])
+    return jwt.decode(
+        jwt_token,
+        public_key,
+        algorithms=[jwt_header["alg"]],
+        audience=config.ENTRA_CLIENT_ID,
+    )
+
+
+@ui.page(config.OAUTH_REDIRECT_URI)
+async def oauth_redirect_page(client: Client) -> None:
+    browser_id = app.storage.browser["id"]
+    auth_flow = INPROGRESS_AUTH_FLOW_CACHE.get(browser_id, None)
+
+    if auth_flow is None:
+        return ui.navigate.to("/login")
+    auth_state = client.request.query_params["state"]
+
+    if auth_state != auth_flow["state"]:
+        ui.label(
+            f"Error during Entra AD authentication - Invalid auth_state parameter: {auth_state} != {auth_flow["state"]}"
+        )
+        return
+    query_params = dict(client.request.query_params)
+    auth_token = msal_application.acquire_token_by_auth_code_flow(
+        auth_flow, query_params
+    )
+
+    if "error" in auth_token:
+        ui.label(
+            f"Error during Entra AD authentication - {auth_token["error"]}: {auth_token["error_description"]}"
+        )
+        return
+    id_token = auth_token.get("id_token")
+    claims = validate_and_decode_jwt_token(id_token)
+
+    if not claims:
+        ui.label(f"Error during Entra AD authentication - Invalid ID token: {id_token}")
+        return
+    USER_CACHE[browser_id] = claims
+
+    ui.navigate.to("/")
+
+
+@ui.page("/logout")
+def logout_page(request: Request):
+    browser_id = app.storage.browser["id"]
+
+    if browser_id in INPROGRESS_AUTH_FLOW_CACHE:
+        del INPROGRESS_AUTH_FLOW_CACHE[browser_id]
+    if browser_id in USER_CACHE:
+        del USER_CACHE[browser_id]
+    if "user" in app.storage.user:
+        del app.storage.user["user"]
+    return RedirectResponse(
+        f"{config.ENTRA_LOGOUT_ENDPOINT}?post_logout_redirect_uri={request.base_url}"
+    )
 
 
 @ui.page("/")
@@ -153,222 +258,21 @@ async def admin_exam_page() -> None:
         await list_of_active_exams()
 
 
-# @ui.refreshable
-# async def list_of_exam_templates() -> None:
-#     async def delete(exam_template: model.ExamTemplate) -> None:
-#         await exam_template.delete()
-#         list_of_exam_templates.refresh()
-
-#     exam_templates: List[model.ExamTemplate] = (
-#         await model.ExamTemplate.all().prefetch_related("questions")
-#     )
-
-#     for exam_template in reversed(exam_templates):
-#         with ui.card():
-#             with ui.row().classes("items-center"):
-#                 ui.input("Name", on_change=exam_template.save).bind_value(
-#                     exam_template, "name"
-#                 ).on("blur", list_of_exam_templates.refresh)
-#                 ui.label().bind_text_from(
-#                     exam_template,
-#                     "num_questions",
-#                     backward=lambda f: f"Number of questions: {f()}",
-#                 )
-#                 ui.button(
-#                     icon="edit",
-#                     on_click=lambda e=exam_template: ui.navigate.to(
-#                         f"/admin/exam/template/{exam_template.id}"
-#                     ),
-#                 )
-#                 ui.button(
-#                     icon="delete",
-#                     on_click=lambda e=exam_template: delete(e),
-#                 ).props("flat")
-
-
 @ui.page("/admin/exam/template")
 async def admin_exam_template_page() -> None:
     exam_template = ExamTemplate(id=None, name=None)
     await exam_template.create()
-    # async def create_exam_template() -> None:
-    # exam_template: model.ExamTemplate = await model.ExamTemplate.create(
-    #     name=name.value
-    # )
-    # list_of_exam_templates.refresh()
-
-    # with ui.column().classes("mx-auto"):
-    #     with ui.row().classes("w-full items-center px-4"):
-    #         name = ui.input(label="Name")
-    #         ui.button(on_click=create_exam_template, icon="add").props("flat").classes(
-    #             "ml-auto"
-    #         )
-    #     await list_of_exam_templates()
-
-
-# @ui.refreshable
-# async def list_of_exam_template_question_responses(
-#     exam_template_question: model.ExamTemplateQuestion,
-# ) -> None:
-#     async def remove_response(response: str) -> None:
-#         exam_template_question.responses.remove(response)
-#         list_of_exam_template_question_responses.refresh()
-
-#     async def add_response() -> None:
-#         exam_template_question_response = (
-#             await model.ExamTemplateQuestionResponse.create(
-#                 exam_template_question=exam_template_question, body=new_response.value
-#             )
-#         )
-#         exam_template_question.responses.append(exam_template_question_response)
-#         new_response.value = ""
-#         list_of_exam_template_question_responses.refresh()
-
-#     with ui.row().classes("items-center"):
-#         new_response = ui.input()
-#         ui.button(icon="add", on_click=add_response).props("flat")
-
-#     for response in reversed(exam_template_question.responses):
-#         with ui.row().classes("items-center"):
-#             ui.input().bind_value(response, "body").on(
-#                 "blur", list_of_exam_template_question_responses.refresh
-#             )
-#             ui.button(
-#                 icon="delete", on_click=lambda r=response: remove_response(r)
-#             ).props("flat")
 
 
 @ui.page("/admin/exam/template/{id}")
 async def admin_edit_exam_template_page(id: UUID) -> None:
-    exam_template: model.ExamTemplate = await ExamTemplate.load(
-        await model.ExamTemplate.get(id=id).prefetch_related(
-            "questions", "questions__responses"
+    with Frame("Admin - Edit Exam Template"):
+        exam_template: model.ExamTemplate = await ExamTemplate.load(
+            await model.ExamTemplate.get(id=id).prefetch_related(
+                "questions",
+                "questions__responses",
+                "questions__exam_template",
+                "questions__responses__exam_template_question",
+            )
         )
-    )
-    await exam_template.edit()
-
-    # @ui.refreshable
-    # async def list_of_exam_template_questions() -> None:
-    #     async def delete(exam_template_question: model.ExamTemplateQuestion) -> None:
-    #         await exam_template_question.delete()
-    #         list_of_exam_template_questions.refresh()
-
-    #     exam_template_questions: List[model.ExamTemplateQuestion] = list(
-    #         await exam_template.questions.all()
-    #     )
-    #     for exam_template_question in reversed(exam_template_questions):
-    #         with ui.item():
-    #             ui.select(
-    #                 options={t.value: t.name for t in model.QuestionType},
-    #                 label="Type",
-    #                 on_change=exam_template_question.save,
-    #             ).bind_value(exam_template_question, "type").on(
-    #                 "blur", list_of_exam_template_questions.refresh
-    #             )
-    #             ui.markdown("Question Body").bind_content(
-    #                 exam_template_question, "body"
-    #             )
-    #             ui.button(
-    #                 icon="edit",
-    #                 on_click=lambda e=exam_template_question: edit_exam_template_question(
-    #                     e
-    #                 ),
-    #             ).props("flat")
-    #             ui.button(
-    #                 icon="delete",
-    #                 on_click=lambda e=exam_template_question: delete(e),
-    #             ).props("flat")
-
-    # exam_template: model.ExamTemplate = await model.ExamTemplate.get(
-    #     id=id
-    # ).prefetch_related("questions", "questions__responses")
-
-    # async def clear_exam_template_question_dialog() -> None:
-    #     editing_exam_template_question = model.ExamTemplateQuestion(
-    #         exam_template=exam_template
-    #     )
-    #     responses.clear()
-    #     list_of_exam_template_questions.refresh()
-    #     list_of_exam_template_question_responses.refresh()
-
-    # editing_exam_template_question: model.ExamTemplateQuestion = (
-    #     model.ExamTemplateQuestion(
-    #         exam_template=exam_template,
-    #         type=model.QuestionType.MULTIPLE_CHOICE_SINGLE_SELECT,
-    #         body="",
-    #     )
-    # )
-    # responses: observables.ObservableList[str] = observables.ObservableList()
-
-    # async def save_exam_template_question() -> None:
-    #     question = await model.ExamTemplateQuestion.update_or_create(
-    #         editing_exam_template_question
-    #     )
-    #     for response in reversed(responses):
-    #         await model.ExamTemplateQuestionResponse.create(
-    #             exam_template_question=question, value=response
-    #         )
-    #     clear_exam_template_question_dialog()
-
-    # async def edit_exam_template_question(
-    #     exam_template_question: model.ExamTemplateQuestion,
-    # ) -> None:
-    #     editing_exam_template_question = exam_template_question
-    #     responses.clear()
-    #     response_values = await exam_template_question.responses.all().values_list(
-    #         "value", flat=True
-    #     )
-    #     for value in response_values:
-    #         responses.append(value)
-    #     list_of_exam_template_questions.refresh()
-    #     list_of_exam_template_question_responses.refresh()
-
-    # # await exam_template.questions.all().values_list("responses__value", flat=True)
-
-    # @ui.refreshable
-    # async def list_of_exam_template_question_responses() -> None:
-    #     async def add_response(response: str) -> None:
-    #         responses.append(response)
-    #         list_of_exam_template_question_responses.refresh()
-
-    #     with ui.column():
-    #         with ui.row().classes("items-center"):
-    #             new_response = ui.input()
-    #             ui.button(
-    #                 icon="add", on_click=lambda: add_response(new_response.value)
-    #             ).props("flat")
-    #         for response in reversed(responses):
-    #             with ui.row().classes("items-center"):
-    #                 ui.input(value=response)
-    #                 ui.button(
-    #                     icon="delete", on_click=lambda: responses.remove(response)
-    #                 ).props("flat")
-
-    # with Frame(f"Exam Template: {exam_template.name}"):
-    #     with ui.card():
-    #         with ui.row().classes("items-center"):
-    #             ui.input("Exam Name", on_change=exam_template.save).bind_value(
-    #                 exam_template, "name"
-    #             ).on("blur", list_of_exam_templates.refresh)
-    #         ui.separator()
-    #         ui.label("Exam Questions:")
-    #         with ui.list():
-    #             with ui.item():
-    #                 ui.select(
-    #                     options={t.value: t.name for t in model.QuestionType},
-    #                     label="Type",
-    #                 ).bind_value(editing_exam_template_question, "type")
-    #                 ui.editor(placeholder="Question Body").bind_value(
-    #                     editing_exam_template_question, "body"
-    #                 )
-    #                 await list_of_exam_template_question_responses()
-    #                 ui.button(
-    #                     icon="clear",
-    #                     on_click=clear_exam_template_question_dialog,
-    #                 ).props("flat").classes("ml-auto")
-    #                 ui.button(
-    #                     icon="save",
-    #                     on_click=save_exam_template_question,
-    #                 ).props(
-    #                     "flat"
-    #                 ).classes("ml-auto")
-    #             await list_of_exam_template_questions()
+        await exam_template.edit()

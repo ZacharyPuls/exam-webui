@@ -16,7 +16,12 @@ async def deinit_db() -> None:
 def main() -> None:
     app.on_startup(init_db)
     app.on_shutdown(deinit_db)
-    ui.run(title="KFN Exam Platform")
+    ui.run(
+        title="KFN Exam Platform",
+        host="127.0.0.1",
+        dark=None,
+        storage_secret=config.NICEGUI_STORAGE_SECRET,
+    )
 
 
 if __name__ in {"__main__", "__mp_main__"}:

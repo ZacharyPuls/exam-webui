@@ -1,7 +1,7 @@
-from nicegui import ui
 from contextlib import contextmanager
 
 from menu import menu
+from nicegui import ui
 
 
 class TextLabel(ui.label):
@@ -23,5 +23,4 @@ def Frame(navigation_title: str):
         ui.space()
         with ui.row():
             menu()
-    with ui.column().classes("absolute-center items-center"):
-        yield
+    yield
