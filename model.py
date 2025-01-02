@@ -1,8 +1,7 @@
+from enum import IntEnum
+
 from tortoise import fields, models
 from tortoise.exceptions import NoValuesFetched
-
-
-from enum import IntEnum
 
 
 class User(models.Model):
@@ -82,3 +81,16 @@ class ExamTemplateQuestion(models.Model):
     )
     type = fields.IntEnumField(enum_type=QuestionType)
     body = fields.TextField()
+    responses: fields.ReverseRelation["ExamTemplateQuestionResponse"]
+
+
+class ExamTemplateQuestionResponse(models.Model):
+    id = fields.UUIDField(pk=True)
+    exam_template_question: fields.ForeignKeyRelation[ExamTemplateQuestion] = (
+        fields.ForeignKeyField(
+            model_name="model.ExamTemplateQuestion",
+            on_delete=fields.CASCADE,
+            related_name="responses",
+        )
+    )
+    value = fields.TextField()
