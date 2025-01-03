@@ -6,6 +6,7 @@ Copyright 2024, Kansas Fiber Network, LLC
 
 from dataclasses import dataclass, field
 from typing import List
+from user import User
 from uuid import UUID
 
 import model
@@ -35,10 +36,12 @@ class ExamTemplateQuestionResponse(Serializable):
         self.edit.refresh()
 
     async def save(self) -> None:
-        await model.ExamTemplateQuestionResponse.update_or_create(
-            id=self.id or None,
-            defaults={"value": self.value, "is_correct": self.is_correct},
+        exam_template_question_response = await model.ExamTemplateQuestionResponse.get(
+            id=self.id
         )
+        exam_template_question_response.value = self.value
+        exam_template_question_response.is_correct = self.is_correct
+        await exam_template_question_response.save()
         self.edit.refresh()
 
     async def delete(self) -> None:
@@ -74,20 +77,21 @@ class ExamTemplateQuestion(Serializable):
     responses: List[ExamTemplateQuestionResponse] = field(default_factory=lambda: [])
 
     async def new(self) -> None:
-        await model.ExamTemplateQuestion.create(
+        exam_template_question = await model.ExamTemplateQuestion.create(
             exam_template_id=self.exam_template_id,
             type=self.type,
             body=self.body,
         )
+        self.id = exam_template_question.id
         for response in self.responses:
             response.exam_template_question_id = self.id
             response.new()
-        # self.create.refresh()
 
     async def save(self) -> None:
-        await model.ExamTemplateQuestion.update_or_create(
-            id=self.id or None, defaults={"type": self.type, "body": self.body}
-        )
+        question = await model.ExamTemplateQuestion.get(id=self.id)
+        question.type = self.type
+        question.body = self.body
+        await question.save()
         for response in self.responses:
             await response.save()
         self.edit.refresh()
@@ -208,16 +212,23 @@ class ExamTemplate(Serializable):
     name: str
     questions: List[ExamTemplateQuestion] = field(default_factory=lambda: [])
 
+    selected_question: int = 1
+
     async def new(self) -> None:
-        exam_template = await model.ExamTemplate.create(name=self.name)
+        author = await User.get_active()
+        exam_template = await model.ExamTemplate.create(
+            name=self.name, author=author, updated_by=author
+        )
         self.id = exam_template.id
         self.create.refresh()
         ui.navigate.to(f"/admin/exam/template/{exam_template.id}")
 
     async def save(self) -> None:
-        await model.ExamTemplate.update_or_create(
-            id=self.id, defaults={"name": self.name}
-        )
+        exam_template = await model.ExamTemplate.get(id=self.id)
+        exam_template.name = self.name
+        exam_template.updated_by = await User.get_active()
+        await exam_template.save()
+
         for question in self.questions:
             await question.save()
         self.edit.refresh()
@@ -236,13 +247,17 @@ class ExamTemplate(Serializable):
             type=model.QuestionType.MULTIPLE_CHOICE_SINGLE_SELECT,
             body="",
         )
+        await new_question.new()
         self.questions.append(new_question)
-        self.edit.refresh()
+        await self.save()
+        self.edit_card.refresh()
 
     async def delete_question(self, question: ExamTemplateQuestion) -> None:
         self.questions.remove(question)
         await question.delete()
-        self.edit.refresh()
+        await self.save()
+        self.selected_question = 1
+        self.edit_card.refresh()
 
     @ui.refreshable
     async def create(self) -> None:
@@ -251,26 +266,50 @@ class ExamTemplate(Serializable):
                 ui.input(label="Name").bind_value(self, "name")
                 ui.button(on_click=self.new, icon="add").props("flat")
 
+    # Inner Edit card is separated into its own method to allow refreshing without breaking pagination
+
+    @ui.refreshable
+    async def edit_card(self) -> None:
+        question = self.questions[self.selected_question - 1]
+        with ui.card():
+            with ui.card_actions().classes("w-full justify-end"):
+                ui.button(
+                    on_click=lambda q=question: self.delete_question(q),
+                    icon="close",
+                )
+            with ui.row():
+                await question.edit()
+
     @ui.refreshable
     async def edit(self) -> None:
-        with ui.card().classes("absolute-center items-center w-full"):
-            with ui.row():
+        with ui.card().classes("absolute-center items-center w-full mx-auto"):
+            with ui.card_section():
                 ui.input("Exam Name").on(type="blur", handler=self.save).bind_value(
                     self, "name"
                 )
+                ui.button(text="Add Question", on_click=self.add_question).props("flat")
+            ui.separator()
+            with ui.card_section():
+                with ui.row():
+                    ui.pagination(
+                        1,
+                        len(self.questions),
+                        direction_links=True,
+                        on_change=self.edit_card.refresh,
+                    ).classes("mx-auto").bind_value(self, "selected_question")
+                await self.edit_card()
+
+    @ui.refreshable
+    async def summary(self) -> None:
+        with ui.card():
             with ui.row():
-                ui.label("Exam Questions")
-                ui.button(text="New Question", on_click=self.add_question).props(
-                    "flat"
-                ).classes("ml-auto")
-            for question in self.questions:
-                with ui.card():
-                    with ui.card_actions().classes("w-full justify-end"):
-                        ui.button(
-                            on_click=lambda: self.delete_question(question),
-                            icon="close",
-                        )
-                    with ui.row():
-                        await question.edit()
-                ui.separator()
-                ui.space()
+                ui.label("Exam Name: ")
+                ui.label().bind_text_from(self, "name")
+            with ui.row():
+                ui.label("Number of Questions: ")
+                ui.label().bind_text_from(self, "questions", backward=len)
+            with ui.card_actions():
+                ui.button(
+                    icon="edit",
+                    on_click=lambda: ui.navigate.to(f"/admin/exam/template/{self.id}"),
+                )

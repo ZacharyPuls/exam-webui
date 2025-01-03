@@ -103,7 +103,12 @@ async def oauth_redirect_page(client: Client) -> None:
         return
     USER_CACHE[browser_id] = claims
 
-    ui.navigate.to("/")
+    name = app.storage.user["user"]["name"]
+    email = app.storage.user["user"]["preferred_username"]
+
+    await model.User.get_or_create(name=name, email=email)
+
+    ui.navigate.to(app.storage.user["previous_url"])
 
 
 @ui.page("/logout")
@@ -122,8 +127,8 @@ def logout_page(request: Request):
 
 
 @ui.page("/")
-async def index_page() -> None:
-    with Frame("Home"):
+async def index_page(request: Request) -> None:
+    with Frame("Home", request):
         TextLabel("Your assigned exams: ").classes("font-bold")
         ui.separator()
         with ui.grid(columns=3):
@@ -134,21 +139,21 @@ async def index_page() -> None:
 
 
 @ui.page("/exam")
-async def exam_index_page() -> None:
-    with Frame("- Exam -"):
+async def exam_index_page(request: Request) -> None:
+    with Frame("- Exam -", request):
         TextLabel("Exam")
         ui.label("This is the exam index page.")
 
 
 @ui.page("/exam/{id}")
-async def exam_page(id: UUID) -> None:
+async def exam_page(id: UUID, request: Request) -> None:
     async def start_exam(exam: model.Exam):
         print(f"Starting exam: {exam.name}")
         first_question = await exam.questions.all().first().prefetch_related("response")
         ui.navigate.to(f"/exam/{exam.id}/question/{first_question.id}")
 
     with await model.Exam.get(id=id).prefetch_related("questions") as exam:
-        with Frame(f"Exam: {exam.name}"):
+        with Frame(f"Exam: {exam.name}", request):
             with ui.card():
                 with ui.row().classes("items-center"):
                     TextLabel(f"Press to start exam: ")
@@ -158,11 +163,13 @@ async def exam_page(id: UUID) -> None:
 
 
 @ui.page("/exam/{exam_id}/question/{question_id}")
-async def exam_question_page(exam_id: UUID, question_id: UUID) -> None:
+async def exam_question_page(
+    exam_id: UUID, question_id: UUID, request: Request
+) -> None:
     with await model.ExamQuestion.get(
         id=question_id
     ) as exam_question, await model.Exam.get(id=exam_id) as exam:
-        with Frame(f"Exam: {exam.name} - Question {question_id}"):
+        with Frame(f"Exam: {exam.name} - Question {question_id}", request):
             with ui.card():
                 with ui.row().classes("items-center"):
                     ui.markdown().bind_content_from(exam_question, "body")
@@ -171,44 +178,48 @@ async def exam_question_page(exam_id: UUID, question_id: UUID) -> None:
 
 
 @ui.refreshable
-async def list_of_users() -> None:
+async def list_of_users(request: Request) -> None:
     async def delete(user: model.User) -> None:
         await user.delete()
         list_of_users.refresh()
 
     users: List[model.User] = await model.User.all()
-    for user in reversed(users):
-        with ui.card():
-            with ui.row().classes("items-center"):
-                ui.input("Name", on_change=user.save).bind_value(user, "name").on(
-                    "blur", list_of_users.refresh
-                )
-                ui.input("Email", on_change=user.save).bind_value(user, "email").on(
-                    "blur", list_of_users.refresh
-                )
-                ui.button(icon="delete", on_click=lambda u=user: delete(u)).props(
-                    "flat"
-                )
+    with Frame("Users", request):
+        for user in reversed(users):
+            with ui.card():
+                with ui.row().classes("items-center"):
+                    ui.input("Name", on_change=user.save).bind_value(user, "name").on(
+                        "blur", list_of_users.refresh
+                    )
+                    ui.input("Email", on_change=user.save).bind_value(user, "email").on(
+                        "blur", list_of_users.refresh
+                    )
+                    ui.button(icon="delete", on_click=lambda u=user: delete(u)).props(
+                        "flat"
+                    )
 
 
 @ui.page("/admin/user")
-async def admin_user_page() -> None:
+async def admin_user_page(request: Request) -> None:
     async def create_user() -> None:
         await model.User.create(name=name.value, email=email.value)
         name.value = ""
         email.value = ""
         list_of_users.refresh()
 
-    with ui.column().classes("mx-auto"):
-        with ui.row().classes("w-full items-center px-4"):
-            name = ui.input(label="Name")
-            email = ui.input(label="Email")
-            ui.button(on_click=create_user, icon="add").props("flat").classes("ml-auto")
-        await list_of_users()
+    with Frame("Edit Users", request):
+        with ui.column().classes("mx-auto"):
+            with ui.row().classes("w-full items-center px-4"):
+                name = ui.input(label="Name")
+                email = ui.input(label="Email")
+                ui.button(on_click=create_user, icon="add").props("flat").classes(
+                    "ml-auto"
+                )
+            await list_of_users(request)
 
 
 @ui.refreshable
-async def list_of_active_exams() -> None:
+async def list_of_active_exams(request: Request) -> None:
     async def cancel(exam: model.Exam) -> None:
         # TODO: do we want to actually delete it? Or just flag it as cancelled?
 
@@ -219,17 +230,18 @@ async def list_of_active_exams() -> None:
         is_complete=False
     ).prefetch_related("questions")
 
-    for exam in reversed(active_exams):
-        with ui.card():
-            with ui.row().classes("items-center"):
-                ui.label().bind_text_from(
-                    exam.user, "name", backward=lambda n: f"Assigned User: {n}"
-                )
-                ui.button(icon="close", on_click=lambda e=exam: cancel(exam))
+    with Frame("Active Exams", request):
+        for exam in reversed(active_exams):
+            with ui.card():
+                with ui.row().classes("items-center"):
+                    ui.label().bind_text_from(
+                        exam.user, "name", backward=lambda n: f"Assigned User: {n}"
+                    )
+                    ui.button(icon="close", on_click=lambda e=exam: cancel(e))
 
 
 @ui.page("/admin/exam/")
-async def admin_exam_page() -> None:
+async def admin_exam_page(request: Request) -> None:
     async def assign_exam_to_user() -> None:
         exam: model.Exam = await model.Exam.create(
             user=user.value, name=exam_template.value, is_complete=False
@@ -245,28 +257,39 @@ async def admin_exam_page() -> None:
         await model.ExamTemplate.all().prefetch_related("questions")
     )
 
-    with ui.column().classes("mx-auto"):
-        with ui.row().classes("w-full items-center px-4"):
-            user = ui.select(options={u: u.name for u in all_users}, label="User")
-            exam_template = ui.select(
-                options={e: e.name for e in all_exam_templates},
-                label="Exam to assign",
-            )
-            ui.button(on_click=assign_exam_to_user, icon="add").props("flat").classes(
-                "ml-auto"
-            )
-        await list_of_active_exams()
+    with Frame("List of Exams", request):
+        with ui.column().classes("mx-auto"):
+            with ui.row().classes("w-full items-center px-4"):
+                user = ui.select(options={u: u.name for u in all_users}, label="User")
+                exam_template = ui.select(
+                    options={e: e.name for e in all_exam_templates},
+                    label="Exam to assign",
+                )
+                ui.button(on_click=assign_exam_to_user, icon="add").props(
+                    "flat"
+                ).classes("ml-auto")
+            await list_of_active_exams(request)
 
 
 @ui.page("/admin/exam/template")
-async def admin_exam_template_page() -> None:
-    exam_template = ExamTemplate(id=None, name=None)
-    await exam_template.create()
+async def admin_exam_template_page(request: Request) -> None:
+    with Frame("Admin - Exam Template", request):
+        with ui.card().classes("absolute-center items-center w-full"):
+            new_exam_template = ExamTemplate(id=None, name=None)
+            await new_exam_template.create()
+
+            for exam_template in await model.ExamTemplate.all().prefetch_related(
+                "questions",
+                "questions__responses",
+                "questions__exam_template",
+                "questions__responses__exam_template_question",
+            ):
+                await (await ExamTemplate.load(exam_template)).summary()
 
 
 @ui.page("/admin/exam/template/{id}")
-async def admin_edit_exam_template_page(id: UUID) -> None:
-    with Frame("Admin - Edit Exam Template"):
+async def admin_edit_exam_template_page(id: UUID, request: Request) -> None:
+    with Frame("Admin - Edit Exam Template", request):
         exam_template: model.ExamTemplate = await ExamTemplate.load(
             await model.ExamTemplate.get(id=id).prefetch_related(
                 "questions",

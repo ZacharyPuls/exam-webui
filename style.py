@@ -1,5 +1,7 @@
 from contextlib import contextmanager
 
+from fastapi import Request
+
 from menu import menu
 from nicegui import ui
 
@@ -11,7 +13,7 @@ class TextLabel(ui.label):
 
 
 @contextmanager
-def Frame(navigation_title: str):
+def Frame(navigation_title: str, request: Request):
     """Custom page frame to share the same styling and behavior across all pages"""
     ui.colors(
         primary="#6E93D6", secondary="#53B689", accent="#111B1E", positive="#53B689"
@@ -22,5 +24,6 @@ def Frame(navigation_title: str):
         ui.label(navigation_title)
         ui.space()
         with ui.row():
-            menu()
-    yield
+            menu(request)
+    with ui.row().classes("w-full"):
+        yield
